@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+Build script for creating Windows executable with PyInstaller
+Includes CUDA runtime libraries for GPU acceleration
+"""
+
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Import the download_models functions
+try:
+    from download_models import download_whisper_model, download_vad_model, verify_models
+except ImportError:
+    print("Warning: download_models.py not found, skipping model download")
+    download_whisper_model = None
+    download_vad_model = None
+    verify_models = None
+
+def find_cuda_libs():
+    """Find CUDA libraries needed for CTranslate2 in the conda environment"""
+    cuda_libs = []
+
+    # For conda environments, libraries are in the conda env root
+    conda_prefix = os.environ.get('CONDA_PREFIX')
+    if conda_prefix:
+        conda_path = Path(conda_prefix)
+    else:
+        conda_path = Path(sys.prefix)
+
+    print(f"Searching for CUDA libraries in: {conda_path}")
+
+    # On Windows, conda installs DLLs in different locations
+    # Check Library/bin for Windows conda environments
+    lib_dirs = [
+        conda_path / "Library" / "bin",  # Windows conda location
+        conda_path / "bin",               # Alternative location
+        conda_path / "lib",               # Linux/Unix style (for reference)
+    ]
+
+    # CUDA and cuDNN library patterns for Windows
+    lib_patterns = [
+        # CUDA runtime
+        "cudart64_*.dll",
+        # cuBLAS
+        "cublas64_*.dll",
+        "cublasLt64_*.dll",
+        # cuDNN core libraries - these are critical!
+        "cudnn64_*.dll",
+        "cudnn_ops_infer64_*.dll",
+        "cudnn_cnn_infer64_*.dll",
+        "cudnn_adv_infer64_*.dll",
+        "cudnn_ops_train64_*.dll",
+        "cudnn_cnn_train64_*.dll",
+        "cudnn_adv_train64_*.dll",
+        # cuDNN without version numbers
+        "cudnn*.dll",
+        # cuFFT
+        "cufft64_*.dll",
+        # cuRAND
+        "curand64_*.dll",
+        # Additional CUDA libraries
+        "nvrtc64_*.dll",
+        "nvrtc-builtins64_*.dll",
+    ]
+
+    # Search in conda library directories
+    for lib_dir in lib_dirs:
+        if lib_dir.exists():
+            print(f"  Checking: {lib_dir}")
+            for pattern in lib_patterns:
+                found = list(lib_dir.glob(pattern))
+                if found:
+                    print(f"    Found {len(found)} files matching {pattern}")
+                    cuda_libs.extend(found)
+
+    # Also check site-packages for pip-installed CUDA libraries
+    site_packages_dirs = [
+        conda_path / "Lib" / "site-packages",  # Windows
+        conda_path / "lib" / "python*" / "site-packages",  # Unix pattern
+    ]
+
+    for site_packages_pattern in site_packages_dirs:
+        if "*" in str(site_packages_pattern):
+            # Handle glob patterns
+            for site_packages in conda_path.glob(str(site_packages_pattern.relative_to(conda_path))):
+                if site_packages.exists():
+                    # Check nvidia packages
+                    nvidia_path = site_packages / "nvidia"
+                    if nvidia_path.exists():
+                        for subdir in nvidia_path.iterdir():
+                            if subdir.is_dir():
+                                lib_dir = subdir / "bin"
+                                if lib_dir.exists():
+                                    for pattern in lib_patterns:
+                                        cuda_libs.extend(lib_dir.glob(pattern))
+
+                    # Check ctranslate2.libs for bundled libraries
+                    ct2_libs = site_packages / "ctranslate2.libs"
+                    if ct2_libs.exists():
+                        cuda_libs.extend(ct2_libs.glob("*.dll"))
+        else:
+            if site_packages_pattern.exists():
+                # Check nvidia packages
+                nvidia_path = site_packages_pattern / "nvidia"
+                if nvidia_path.exists():
+                    for subdir in nvidia_path.iterdir():
+                        if subdir.is_dir():
+                            lib_dir = subdir / "bin"
+                            if lib_dir.exists():
+                                for pattern in lib_patterns:
+                                    cuda_libs.extend(lib_dir.glob(pattern))
+
+                # Check ctranslate2.libs for bundled libraries
+                ct2_libs = site_packages_pattern / "ctranslate2.libs"
+                if ct2_libs.exists():
+                    cuda_libs.extend(ct2_libs.glob("*.dll"))
+
+    # Remove duplicates
+    cuda_libs = list(set(cuda_libs))
+    cuda_libs.sort(key=lambda x: x.name)
+
+    return cuda_libs
+
+def download_models_if_needed():
+    """Download models if they don't exist"""
+    if verify_models is None:
+        print("Warning: Model download not available")
+        return True
+
+    print("\n📦 Checking models...")
+    if verify_models():
+        print("✓ All models present")
+        return True
+
+    print("\n⬇ Downloading missing models...")
+    success = True
+
+    # Download Whisper model
+    if download_whisper_model:
+        if not download_whisper_model():
+            print("❌ Failed to download Whisper model files")
+            success = False
+
+    # Download VAD model
+    if download_vad_model:
+        if not download_vad_model():
+            print("❌ Failed to download VAD model")
+            success = False
+
+    # Final verification
+    if verify_models and verify_models():
+        print("✅ All models ready")
+        return True
+    else:
+        print("❌ Model download failed. Cannot continue without required models.")
+        return False
+
+def build():
+    """Main build function"""
+    print("Starting Windows build with CUDA support...")
+
+    # Check if we're in a virtual environment or conda environment
+    in_conda = os.environ.get('CONDA_PREFIX') is not None
+    in_venv = hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
+
+    if in_conda:
+        print(f"✓ Using conda environment: {os.environ.get('CONDA_DEFAULT_ENV', 'unknown')}")
+    elif in_venv:
+        print("✓ Using virtual environment")
+    else:
+        print("Warning: Not in a conda or virtual environment. Make sure dependencies are installed.")
+
+    print("Note: Models are not included in PyInstaller build and will be handled by CI")
+    print("CUDA libraries will be included via spec file's binary collection")
+
+    # Use the project.spec directly
+    spec_file = Path("project.spec")
+    if not spec_file.exists():
+        print("Error: project.spec not found!")
+        return 1
+
+    # Build command - using the spec file directly
+    build_cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--clean",
+        "--noconfirm",
+        "project.spec"
+    ]
+
+    print(f"Running: {' '.join(build_cmd)}")
+    result = subprocess.run(build_cmd, capture_output=False)
+
+    # Verify build succeeded and check for CUDA libraries
+    if result.returncode == 0:
+        dist_dir = Path("dist/faster_whisper_transwithai_chickenrice")
+        if dist_dir.exists():
+            # Quick verification of critical libraries
+            print("\nVerifying CUDA libraries in distribution...")
+
+            critical_libs = ['cudnn', 'cublas', 'cudart']
+            found_libs = {}
+            missing_libs = []
+
+            # Check in root directory and all subdirectories
+            all_dlls = list(dist_dir.glob("**/*.dll"))
+
+            for critical in critical_libs:
+                found_in_locations = []
+                for dll_path in all_dlls:
+                    if critical in dll_path.name.lower():
+                        # Get relative path from dist_dir
+                        rel_path = dll_path.relative_to(dist_dir)
+                        location = str(rel_path.parent) if str(rel_path.parent) != '.' else 'root'
+                        found_in_locations.append(location)
+
+                if found_in_locations:
+                    # Remove duplicates and store
+                    found_libs[critical] = list(set(found_in_locations))
+                else:
+                    missing_libs.append(critical)
+
+            if found_libs:
+                print(f"  ✓ Found critical libraries:")
+                for lib, locations in found_libs.items():
+                    locations_str = ', '.join(locations)
+                    print(f"    - {lib}: {locations_str}")
+
+            if missing_libs:
+                print(f"  ⚠ Missing libraries: {', '.join(missing_libs)}")
+                print("     Note: The PyInstaller hooks should have included these.")
+                print("     If GPU acceleration doesn't work, check your conda environment.")
+
+            print(f"\nBuild complete! Output in: {dist_dir}")
+        else:
+            print("Error: dist/faster_whisper_transwithai_chickenrice directory not found after build")
+            return 1
+    else:
+        print("\nBuild failed!")
+        return 1
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(build())

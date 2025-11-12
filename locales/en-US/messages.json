@@ -1,0 +1,130 @@
+{
+  "app": {
+    "name": "Whisper Transcription Enhanced",
+    "description": "Whisper transcription with custom VAD injection"
+  },
+
+  "args": {
+    "model_path": "Path to the Whisper model",
+    "device": "Device to run the model on (cpu, cuda, auto)",
+    "compute_type": "Compute type for the model",
+    "overwrite": "Overwrite existing subtitle files",
+    "audio_extensions": "Comma-separated list of audio file extensions to process",
+    "subtitle_formats": "Comma-separated list of subtitle formats (lrc, srt, vtt, txt)",
+    "output_dir": "Output directory for subtitle files",
+    "config_file": "Path to generation config file",
+    "log_level": "Logging level",
+    "vad_threshold": "Override VAD threshold",
+    "min_speech_duration": "Override minimum speech duration in ms",
+    "min_silence_duration": "Override minimum silence duration in ms",
+    "speech_padding": "Override speech padding in ms",
+    "directories": "Directories or files to process"
+  },
+
+  "info": {
+    "output_dir": "Output directory: {output_dir}",
+    "generation_config": "Generation config: {config}",
+    "initializing_vad": "Initializing enhanced VAD model...",
+    "vad_activated": "✓ Enhanced VAD activated (threshold={threshold})",
+    "loading_whisper": "Loading Whisper model...",
+    "translating": "Translating ({current}/{total}): {path}",
+    "duration": "Duration: {duration}",
+    "duration_filtered": "Duration: {original} → {filtered} ({percent} speech detected)",
+    "writing": "Writing: {path}",
+    "vad_deactivated": "VAD injection deactivated",
+    "no_files_found": "No files found to translate"
+  },
+
+  "tasks": {
+    "translation": {
+      "one": "Translation task: {count}",
+      "other": "Translation tasks: {count}"
+    }
+  },
+
+  "files": {
+    "found": {
+      "one": "Found {count} file to process",
+      "other": "Found {count} files to process"
+    },
+    "count": {
+      "one": "{count} file",
+      "other": "{count} files"
+    }
+  },
+
+  "warnings": {
+    "provide_directories": "Please provide directories to translate",
+    "drag_files": "Please drag files or directories to translate onto this program",
+    "unknown_format": "Unknown format: {format}",
+    "loaded_vad_config": "Loaded VAD configuration from {path}",
+    "failed_load_vad": "Failed to load VAD metadata from {path}: {error}",
+    "using_default_vad": "Using default VAD configuration",
+    "vad_file_not_found": "VAD metadata file not found at {path}"
+  },
+
+  "progress": {
+    "vad": "VAD Progress: {current}/{total} chunks ({percent:0.1f}%) on {device}"
+  },
+
+  "debug": {
+    "processing": "Processing: {path}",
+    "file_suffix": "File suffix: {suffix}",
+    "valid_suffixes": "Valid suffixes: {suffixes}",
+    "skipped_suffix": "Skipped - suffix '{suffix}' not in valid audio formats",
+    "subtitle_exists": "Subtitle already exists: {path}",
+    "skipped_all_exist": "Skipped - all subtitle formats already exist",
+    "added_task": "Added task for formats: {formats}",
+    "scanning": "Scanning: {path}"
+  },
+
+  "time": {
+    "duration_hours": "{hours}h {minutes}m {seconds:0.0f}s",
+    "duration_minutes": "{minutes}m {seconds:0.1f}s",
+    "duration_seconds": "{seconds:0.2f}s"
+  },
+
+  "format": {
+    "percentage": "{value:0.1f}%"
+  },
+
+  "vad": {
+    "onnx_not_installed": "onnxruntime not installed. Install with:\n  pip install onnxruntime      # For CPU\n  pip install onnxruntime-gpu  # For GPU",
+    "transformers_not_installed": "transformers not installed. Install with:\n  pip install transformers",
+    "model_loaded": "ONNX Model loaded: {path}",
+    "auto_configured": "Auto-configured ONNX to use {threads} CPU threads (half of {total} available)",
+    "device": "Device: {device}",
+    "providers": "Providers: {providers}",
+    "chunk_duration": "Chunk duration: {duration}ms",
+    "frame_duration": "Frame duration: {duration}ms",
+    "librosa_not_installed": "librosa not installed, assuming audio is already at 16kHz",
+    "starting": "Starting VAD processing on {device}",
+    "total_samples": "Total audio samples: {samples}",
+    "chunk_size": "Chunk size: {samples} samples ({duration}ms)",
+    "total_chunks": "Total chunks to process: {chunks}",
+    "processing_chunk": "Processing chunk {current}/{total} ({percent:0.1f}%) on {device}",
+    "completed": "VAD processing completed: {chunks} chunks processed on {device}",
+    "model_initialized": "WhisperVadModel initialized with model: {path}",
+    "using_device": "Using device: {device}",
+    "init_failed": "Failed to initialize ONNX model: {error}",
+    "path_invalid": "ONNX model path not provided or doesn't exist: {path}",
+    "not_initialized": "WhisperVadModel: ONNX model not initialized. Please provide a valid ONNX model path.",
+    "speech_segments": {
+      "one": "Found {count} speech segment using Whisper VAD",
+      "other": "Found {count} speech segments using Whisper VAD"
+    },
+    "registered": "Registered whisper_vad model with progress callback",
+    "model_not_found": "Model {model_id} not found, using default"
+  },
+
+  "injection": {
+    "already_active": "VAD injection already active, skipping",
+    "patched": "Patched {path}",
+    "patch_failed": "Could not patch {path}: {error}",
+    "activated_with_model": "VAD injection activated with model '{model_id}'",
+    "activated": "VAD injection activated",
+    "not_active": "VAD injection not active, nothing to uninject",
+    "stop_error": "Error stopping patch: {error}",
+    "auto_injected": "Auto-injected VAD with model: {model_id}"
+  }
+}
