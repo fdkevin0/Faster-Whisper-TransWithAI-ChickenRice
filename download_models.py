@@ -222,6 +222,106 @@ def download_vad_model():
     print(f"  {CHECKMARK} Downloaded {success_count}/{len(files)} files")
     return success_count == len(files)
 
+def download_whisper_base_for_feature_extractor():
+    """Download whisper-base model files specifically for feature extractor (offline usage)"""
+    repo_id = "openai/whisper-base"
+    models_dir = Path("models") / "whisper-base"
+    base_url = f"https://huggingface.co/{repo_id}/resolve/main/"
+
+    print(f"\n{PACKAGE} Downloading whisper-base for feature extractor (offline usage)")
+
+    # Check if files already exist from main models folder
+    existing_models_dir = Path("models")
+    if existing_models_dir.exists():
+        # Files we can copy from existing models folder if available
+        files_to_copy = [
+            "preprocessor_config.json",
+            "config.json",
+            "tokenizer.json",
+            "vocab.json",
+        ]
+
+        copied = 0
+        models_dir.mkdir(parents=True, exist_ok=True)
+        for filename in files_to_copy:
+            src = existing_models_dir / filename
+            dest = models_dir / filename
+            if src.exists() and not dest.exists():
+                shutil.copy2(src, dest)
+                print(f"  {CHECKMARK} Copied {filename} from existing models folder")
+                copied += 1
+            elif dest.exists():
+                print(f"  {CHECKMARK} {filename} already exists")
+                copied += 1
+
+        if copied >= 2:  # At minimum we need preprocessor_config.json and config.json
+            print(f"  {CHECKMARK} Used existing files for whisper-base")
+            return True
+
+    # Download ONLY the specific files needed for feature extractor
+    # We don't need model weights (.bin, .safetensors) for feature extraction
+    required_files = [
+        "preprocessor_config.json",  # Required for feature extractor
+        "config.json",               # Required for configuration
+        "tokenizer.json",            # Optional but useful for tokenization
+        "vocab.json",                # Optional but useful for vocabulary
+    ]
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Downloading feature extractor files from {repo_id}...")
+
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    })
+
+    success_count = 0
+    for filename in required_files:
+        url = urljoin(base_url, filename)
+        dest_path = models_dir / filename
+        if download_file(url, dest_path, session):
+            success_count += 1
+
+    print(f"  {CHECKMARK} Downloaded {success_count}/{len(required_files)} feature extractor files")
+    return success_count >= 2  # At minimum we need the two required files
+
+def verify_whisper_base_feature_extractor():
+    """Verify that whisper-base feature extractor files exist"""
+    models_dir = Path("models") / "whisper-base"
+
+    required_files = [
+        ("preprocessor_config.json", "Feature extractor config"),
+        ("config.json", "Model configuration"),
+    ]
+
+    optional_files = [
+        ("tokenizer.json", "Tokenizer"),
+        ("vocab.json", "Vocabulary"),
+    ]
+
+    if not models_dir.exists():
+        return False
+
+    print(f"\n{SEARCH} Verifying whisper-base feature extractor files...")
+    all_required_present = True
+
+    for filename, description in required_files:
+        filepath = models_dir / filename
+        if filepath.exists():
+            size_kb = filepath.stat().st_size / 1024
+            print(f"  {CHECKMARK} {filename} ({size_kb:.1f} KB)")
+        else:
+            print(f"  {CROSS} {filename} missing - {description}")
+            all_required_present = False
+
+    for filename, description in optional_files:
+        filepath = models_dir / filename
+        if filepath.exists():
+            size_kb = filepath.stat().st_size / 1024
+            print(f"  {CHECKMARK} {filename} ({size_kb:.1f} KB) - optional")
+
+    return all_required_present
+
 def verify_vad_model():
     """Verify that required VAD model files exist"""
     models_dir = Path("models")
@@ -288,16 +388,19 @@ def main():
         epilog="""
 Examples:
   %(prog)s
-    # Download only ONNX VAD model (required)
+    # Download VAD model and whisper-base (both required for offline usage)
+
+  %(prog)s --skip-whisper-base
+    # Download only VAD model, skip whisper-base (not recommended)
 
   %(prog)s --hf-model chickenrice0721/whisper-large-v2-translate-zh-v0.2-st-ct2
-    # Download VAD model and Chickenrice Whisper model
+    # Download VAD, whisper-base, and Chickenrice Whisper model
 
   %(prog)s --hf-model openai/whisper-large-v3 --target-dir whisper-v3
-    # Download VAD model and Whisper v3 to specific directory
+    # Download VAD, whisper-base, and Whisper v3 to specific directory
 
   %(prog)s --force --hf-model myusername/my-custom-model
-    # Force re-download and get custom model
+    # Force re-download everything including VAD, whisper-base, and custom model
         """
     )
 
@@ -325,6 +428,12 @@ Examples:
         help='Skip downloading VAD model (not recommended, for testing only)'
     )
 
+    parser.add_argument(
+        '--skip-whisper-base',
+        action='store_true',
+        help='Skip downloading whisper-base model for feature extractor (not recommended)'
+    )
+
     args = parser.parse_args()
 
     print("=" * 60)
@@ -341,6 +450,13 @@ Examples:
     else:
         vad_exists = False
 
+    # Check if whisper-base feature extractor already exists
+    whisper_base_exists = False
+    if not args.skip_whisper_base and not args.force:
+        if verify_whisper_base_feature_extractor():
+            print(f"\n{CHECKMARK} Whisper-base feature extractor files already present")
+            whisper_base_exists = True
+
     # Check if HF model already exists (if specified)
     hf_exists = False
     if args.hf_model and not args.force:
@@ -349,7 +465,8 @@ Examples:
             hf_exists = True
 
     # If everything exists and no force flag, ask user
-    if vad_exists and (not args.hf_model or hf_exists) and not args.force:
+    all_exists = vad_exists and (not args.hf_model or hf_exists) and (args.skip_whisper_base or whisper_base_exists)
+    if all_exists and not args.force:
         response = input("\nAll required models are present. Re-download? (y/N): ").strip().lower()
         if response != 'y':
             print("Skipping download.")
@@ -365,6 +482,14 @@ Examples:
             success = False
     else:
         print(f"\n{WARNING} Skipping VAD model download (not recommended)")
+
+    # Download whisper-base feature extractor (unless explicitly skipped)
+    if not args.skip_whisper_base:
+        if not download_whisper_base_for_feature_extractor():
+            print(f"{WARNING} Warning: Whisper-base feature extractor could not be downloaded completely")
+            # Don't fail completely if feature extractor download has issues
+    else:
+        print(f"\n{WARNING} Skipping whisper-base download (not recommended for offline usage)")
 
     # Download HuggingFace model if specified
     if args.hf_model:
@@ -382,6 +507,13 @@ Examples:
         else:
             print(f"\n{ERROR} Critical: VAD model is missing. Cannot proceed without it.")
             return 1
+
+    # Verify whisper-base feature extractor (unless skipped)
+    if not args.skip_whisper_base:
+        if verify_whisper_base_feature_extractor():
+            print(f"\n{SUCCESS} Whisper-base feature extractor downloaded successfully!")
+        else:
+            print(f"\n{WARNING} Warning: Some whisper-base feature extractor files may be missing.")
 
     # Verify HF model if specified
     if args.hf_model:

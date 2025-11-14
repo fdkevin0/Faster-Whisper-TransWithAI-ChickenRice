@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import warnings
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Protocol, Callable
 import numpy as np
 from dataclasses import dataclass
@@ -106,10 +107,25 @@ class WhisperVADOnnxWrapper:
                 'total_duration_ms': 30000,
             }
 
-        # Initialize feature extractor
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
-            self.metadata['whisper_model_name']
-        )
+        # Initialize feature extractor - try local folder first for offline usage
+        local_whisper_base_path = Path("models/whisper-base")
+        if local_whisper_base_path.exists() and (local_whisper_base_path / "preprocessor_config.json").exists():
+            # Load from local folder for offline usage
+            try:
+                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                    str(local_whisper_base_path)
+                )
+                print(f"Loaded WhisperFeatureExtractor from local folder: {local_whisper_base_path}")
+            except Exception as e:
+                warnings.warn(f"Failed to load from local folder, trying online: {e}")
+                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                    self.metadata['whisper_model_name']
+                )
+        else:
+            # Try to load from HuggingFace (requires internet)
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                self.metadata['whisper_model_name']
+            )
 
         # Set up ONNX Runtime session
         opts = ort.SessionOptions()

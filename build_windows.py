@@ -11,12 +11,18 @@ from pathlib import Path
 
 # Import the download_models functions
 try:
-    from download_models import download_whisper_model, download_vad_model, verify_models
+    from download_models import (
+        download_vad_model,
+        download_whisper_base_for_feature_extractor,
+        verify_vad_model,
+        verify_whisper_base_feature_extractor
+    )
 except ImportError:
     print("Warning: download_models.py not found, skipping model download")
-    download_whisper_model = None
     download_vad_model = None
-    verify_models = None
+    download_whisper_base_for_feature_extractor = None
+    verify_vad_model = None
+    verify_whisper_base_feature_extractor = None
 
 def find_cuda_libs():
     """Find CUDA libraries needed for CTranslate2 in the conda environment"""
@@ -125,32 +131,41 @@ def find_cuda_libs():
 
 def download_models_if_needed():
     """Download models if they don't exist"""
-    if verify_models is None:
+    if verify_vad_model is None:
         print("Warning: Model download not available")
         return True
 
     print("\n📦 Checking models...")
-    if verify_models():
+
+    # Check VAD model (always required)
+    vad_ok = verify_vad_model() if verify_vad_model else False
+    # Check whisper-base feature extractor (required for offline usage)
+    whisper_base_ok = verify_whisper_base_feature_extractor() if verify_whisper_base_feature_extractor else False
+
+    if vad_ok and whisper_base_ok:
         print("✓ All models present")
         return True
 
     print("\n⬇ Downloading missing models...")
     success = True
 
-    # Download Whisper model
-    if download_whisper_model:
-        if not download_whisper_model():
-            print("❌ Failed to download Whisper model files")
-            success = False
-
-    # Download VAD model
-    if download_vad_model:
+    # Download VAD model if needed
+    if not vad_ok and download_vad_model:
         if not download_vad_model():
             print("❌ Failed to download VAD model")
             success = False
 
+    # Download whisper-base for feature extractor if needed
+    if not whisper_base_ok and download_whisper_base_for_feature_extractor:
+        if not download_whisper_base_for_feature_extractor():
+            print("❌ Failed to download whisper-base feature extractor")
+            success = False
+
     # Final verification
-    if verify_models and verify_models():
+    final_vad_ok = verify_vad_model() if verify_vad_model else False
+    final_whisper_base_ok = verify_whisper_base_feature_extractor() if verify_whisper_base_feature_extractor else False
+
+    if final_vad_ok and final_whisper_base_ok:
         print("✅ All models ready")
         return True
     else:

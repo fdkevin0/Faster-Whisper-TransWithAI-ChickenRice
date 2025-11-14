@@ -2,7 +2,6 @@ name: Build and Release with Conda
 
 on:
   push:
-    branches: [ main ]
     tags:
       - 'v*'
   pull_request:
@@ -149,20 +148,20 @@ jobs:
         echo "Conda environment location:"
         conda info --envs
 
-    - name: Cache HuggingFace models
-      if: matrix.hf_model != ''
+    - name: Cache HuggingFace and whisper-base models
       uses: actions/cache@v4
       with:
-        # Only cache HuggingFace model subdirectories, not VAD models
+        # Cache HuggingFace model subdirectories and whisper-base, not VAD models
         # The chickenrice model goes into models/whisper-large-v2-translate-zh-v0.2-st-ct2/
+        # The whisper-base goes into models/whisper-base/
         path: |
           models/*/
           !models/*.onnx
           !models/*.json
-        key: hf-model-${{ matrix.model_variant }}-${{ hashFiles('download_models.py') }}-${{ matrix.hf_model }}
+        key: hf-model-${{ matrix.model_variant }}-${{ hashFiles('download_models.py') }}-${{ matrix.hf_model }}-whisper-base
         restore-keys: |
+          hf-model-${{ matrix.model_variant }}-${{ hashFiles('download_models.py') }}-${{ matrix.hf_model }}-
           hf-model-${{ matrix.model_variant }}-${{ hashFiles('download_models.py') }}-
-          hf-model-${{ matrix.model_variant }}-
 
     - name: Display environment info
       run: |
@@ -180,7 +179,7 @@ jobs:
           # Use buffered find instead of ls for better performance
           find models -maxdepth 1 -printf "%M %u %g %s %TY-%Tm-%Td %TH:%TM %p\n" 2>/dev/null | head -20
           echo ""
-          echo "Model subdirectories (HuggingFace models only, cached):"
+          echo "Model subdirectories (HuggingFace models and whisper-base, cached):"
           # Pre-calculate all sizes at once
           du -sh models/*/ 2>/dev/null | while read size dir; do
             echo "  - $(basename "$dir"): $size"
@@ -204,6 +203,13 @@ jobs:
         echo ""
         echo "VAD models (not cached, always re-downloaded):"
         find models -maxdepth 1 \( -name "*.onnx" -o -name "*.json" \) -printf "  %p (%s bytes)\n" 2>/dev/null || echo "  No VAD model files found"
+        echo ""
+        echo "Whisper-base feature extractor files:"
+        if [ -d "models/whisper-base" ]; then
+          find models/whisper-base -type f -printf "  %p (%s bytes)\n" 2>/dev/null | head -10
+        else
+          echo "  Not yet downloaded"
+        fi
         echo ""
         if [ "${{ matrix.hf_model }}" != "" ]; then
           echo "HuggingFace models (cached):"
@@ -250,17 +256,30 @@ jobs:
           cp models/*.onnx dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
           cp models/*.json dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
 
+          # Copy whisper-base for feature extractor (always included for offline usage)
+          echo "Copying whisper-base for feature extractor..."
+          if [ -d "models/whisper-base" ]; then
+            echo "  Found whisper-base directory, copying..."
+            cp -r models/whisper-base dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
+            echo "  Whisper-base copied for offline feature extractor support"
+          else
+            echo "  WARNING: whisper-base directory not found"
+          fi
+
           # Copy HuggingFace models if this is a chickenrice variant
           if [ "${{ matrix.model_variant }}" = "chickenrice" ]; then
             echo "Copying Chickenrice model..."
             for dir in models/*/; do
               if [ -d "$dir" ]; then
                 model_name=$(basename "$dir")
-                echo "  Copying model contents from: $model_name"
-                # Copy the contents of the model directory, not the directory itself
-                cp -r "$dir"* dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
-                # Also copy hidden files if any exist
-                cp -r "$dir".* dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
+                # Skip whisper-base as we already copied it
+                if [ "$model_name" != "whisper-base" ]; then
+                  echo "  Copying model contents from: $model_name"
+                  # Copy the contents of the model directory, not the directory itself
+                  cp -r "$dir"* dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
+                  # Also copy hidden files if any exist
+                  cp -r "$dir".* dist/faster_whisper_transwithai_chickenrice/models/ 2>/dev/null || true
+                fi
               fi
             done
           fi
