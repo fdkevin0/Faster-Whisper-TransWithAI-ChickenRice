@@ -136,6 +136,47 @@ jobs:
         echo "Verifying onnxruntime-gpu installation..."
         python -c "import onnxruntime as ort; print(f'ONNX Runtime version: {ort.__version__}'); print(f'Available providers: {ort.get_available_providers()}')" || echo "Note: GPU providers won't show on GitHub runners (no GPU)"
 
+    - name: Apply batch transcribe patch to faster-whisper
+      run: |
+        echo "Applying batch transcribe patch to faster-whisper package..."
+        # Find the faster-whisper package installation directory
+        FASTER_WHISPER_PATH=$(python -c "import faster_whisper; import os; print(os.path.dirname(faster_whisper.__file__))")
+        echo "faster-whisper package location: $FASTER_WHISPER_PATH"
+
+        # Verify the transcribe.py file exists
+        if [ -f "$FASTER_WHISPER_PATH/transcribe.py" ]; then
+          echo "Found transcribe.py at: $FASTER_WHISPER_PATH/transcribe.py"
+
+          # Apply the batch transcribe patch
+          echo "Applying batch-transcribe.patch..."
+          patch -p1 -d "$FASTER_WHISPER_PATH/.." < patches/batch-transcribe.patch
+
+          # Verify patch was applied
+          if [ $? -eq 0 ]; then
+            echo "Batch transcribe patch applied successfully!"
+
+            # Display the patched sections for verification
+            echo ""
+            echo "Verifying batch transcribe patch was applied correctly..."
+            echo "Checking for max_initial_timestamp_index calculation:"
+            grep -A 2 -B 2 "max_initial_timestamp_index = int" "$FASTER_WHISPER_PATH/transcribe.py" || echo "Pattern not found"
+
+            echo ""
+            echo "Checking for without_timestamps default value:"
+            grep "without_timestamps: bool = False" "$FASTER_WHISPER_PATH/transcribe.py" || echo "Pattern not found"
+
+            echo ""
+            echo "Checking for max_initial_timestamp parameter pass-through:"
+            grep "max_initial_timestamp=max_initial_timestamp" "$FASTER_WHISPER_PATH/transcribe.py" || echo "Pattern not found"
+          else
+            echo "WARNING: Batch transcribe patch failed to apply, but continuing build..."
+            echo "This might be because the patch is already applied or the file has changed."
+          fi
+        else
+          echo "ERROR: Could not find transcribe.py at expected location!"
+          echo "Build will continue without batch transcribe patch."
+        fi
+
     - name: Report conda cache status
       run: |
         echo "Conda packages cache hit: ${{ steps.conda-cache.outputs.cache-hit }}"

@@ -18,7 +18,7 @@ from collections import ChainMap
 from typing import Optional, Dict, Any
 
 import pyjson5
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 import ctranslate2
 
 # Import our VAD injection system
@@ -68,6 +68,14 @@ def parse_arguments():
     # Debug option for interactive console
     parser.add_argument('--console', action='store_true',
                        help="Launch interactive Python console for debugging")
+
+    # Batch inference options
+    parser.add_argument('--enable_batching', action='store_true',
+                       help="Enable batched inference for faster processing (requires more VRAM)")
+    parser.add_argument('--batch_size', type=int, default=None,
+                       help="Batch size for batched inference (auto-detect if not specified)")
+    parser.add_argument('--max_batch_size', type=int, default=8,
+                       help="Maximum batch size to try when auto-detecting (default: 8)")
 
     parser.add_argument('base_dirs', nargs=argparse.REMAINDER,
                        help=_("args.directories"))
@@ -298,7 +306,12 @@ class Inference:
             self.compute_type = select_best_compute_type(self.device)
         else:
             self.compute_type = args.compute_type
-        self.batch_size = 0
+
+        # Batch inference settings
+        self.enable_batching = args.enable_batching
+        self.batch_size = args.batch_size if args.batch_size else 0
+        self.max_batch_size = args.max_batch_size
+
         self.overwrite = args.overwrite
         self.output_dir = args.output_dir
         if self.output_dir:
@@ -329,8 +342,6 @@ class Inference:
             "vad_filter": True,
         }
 
-        if self.batch_size > 0:
-            config["batch_size"] = self.batch_size
 
         # Load from file if exists
         if os.path.exists(args.generation_config):
@@ -477,13 +488,64 @@ class Inference:
             model = WhisperModel(self.model_name_or_path, device=self.device, compute_type=self.compute_type)
             logger.info(_("info.model_precision").format(precision=self.compute_type, device=self.device))
 
+            # Setup batched inference if enabled
+            batched_model = None
+            batch_size_to_use = self.batch_size
+
+            if self.enable_batching:
+                try:
+                    batched_model = BatchedInferencePipeline(model=model)
+
+                    # Auto-detect batch size if not specified
+                    if batch_size_to_use == 0 and len(tasks) > 0:
+                        # Use the first audio file as sample for testing
+                        batch_size_to_use = self._find_executable_batch_size(
+                            model,
+                            tasks[0].audio_path,
+                            min_batch_size=1,
+                            max_batch_size=self.max_batch_size
+                        )
+
+                        if batch_size_to_use == 0:
+                            logger.warning("Could not find suitable batch size. Falling back to non-batched mode.")
+                            batched_model = None
+
+                    if batched_model and batch_size_to_use > 0:
+                        logger.info(f"Using batched inference with batch size: {batch_size_to_use}")
+
+                except Exception as e:
+                    logger.warning(f"Failed to setup batched inference: {str(e)}. Falling back to non-batched mode.")
+                    batched_model = None
+
             for i, task in enumerate(tasks):
                 logger.info(_("info.translating", current=i + 1, total=len(tasks), path=task.audio_path))
 
-                _segments, info = model.transcribe(
-                    task.audio_path,
-                    **self.generation_config,
-                )
+                # Use batched or regular inference
+                if batched_model and batch_size_to_use > 0:
+                    # Use auto-retry with batch size reduction on OOM
+                    # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
+                    try:
+                        _segments, info, actual_batch_size = self._transcribe_with_auto_batch_size(
+                            batched_model,
+                            task.audio_path,
+                            starting_batch_size=batch_size_to_use
+                        )
+                        # Update batch_size_to_use if it was auto-adjusted
+                        if actual_batch_size < batch_size_to_use:
+                            logger.info(f"Batch size auto-adjusted from {batch_size_to_use} to {actual_batch_size}")
+                            batch_size_to_use = actual_batch_size
+                    except Exception as e:
+                        logger.warning(f"Batched inference failed: {str(e)}. Falling back to non-batched mode.")
+                        # Fallback to non-batched
+                        _segments, info = model.transcribe(
+                            task.audio_path,
+                            **self.generation_config,
+                        )
+                else:
+                    _segments, info = model.transcribe(
+                        task.audio_path,
+                        **self.generation_config,
+                    )
 
                 if info.duration == info.duration_after_vad or info.duration_after_vad == 0:
                     logger.info(_("info.duration", duration=format_duration(info.duration)))
@@ -517,6 +579,146 @@ class Inference:
             if self.vad_injected:
                 uninject_vad()
                 logger.info(_("info.vad_deactivated"))
+
+    def _find_executable_batch_size(self, model, sample_audio_path, min_batch_size=1, max_batch_size=64):
+        """
+        Find the maximum executable batch size for batched inference.
+        Starts from max_batch_size and works down exponentially on OOM.
+
+        Args:
+            model: WhisperModel instance
+            sample_audio_path: Path to a sample audio file for testing
+            min_batch_size: Minimum batch size to try
+            max_batch_size: Maximum batch size to try
+
+        Returns:
+            Optimal batch size that fits in memory
+        """
+        if not self.enable_batching:
+            return 0
+
+        logger.info(_("batch.finding_optimal", min_size=min_batch_size, max_size=max_batch_size))
+
+        # Start from max and work down on failure (like HuggingFace Accelerate)
+        current_batch_size = max_batch_size
+
+        while current_batch_size >= min_batch_size:
+            try:
+                logger.info(_("batch.testing_size", size=current_batch_size))
+
+                # Try to create batched pipeline with this batch size
+                batched_model = BatchedInferencePipeline(model=model)
+
+                # Test transcription with this batch size
+                # Note: batch_size is passed separately to BatchedInferencePipeline.transcribe()
+                # It's NOT part of generation_config
+                segments, info = batched_model.transcribe(
+                    sample_audio_path,
+                    batch_size=current_batch_size,  # batch_size is a separate parameter
+                    **self.generation_config  # generation_config doesn't include batch_size
+                )
+
+                # Force evaluation by converting to list
+                list(segments)
+
+                # Success! This batch size works
+                logger.info(_("batch.size_successful", size=current_batch_size))
+                logger.info(_("batch.optimal_found", size=current_batch_size))
+                return current_batch_size
+
+            except RuntimeError as e:
+                # If OOM, reduce batch size exponentially
+                error_msg = str(e)
+                if "out of memory" in error_msg.lower() or "oom" in error_msg.lower():
+                    logger.warning(_("batch.oom_error", size=current_batch_size))
+                else:
+                    logger.warning(_("batch.runtime_error", size=current_batch_size, error=error_msg))
+
+                # Reduce batch size by half (exponential backoff)
+                new_batch_size = current_batch_size // 2
+
+                # Ensure we reduce by at least 1
+                if new_batch_size == current_batch_size:
+                    new_batch_size = current_batch_size - 1
+
+                if new_batch_size < min_batch_size:
+                    logger.error(_("batch.no_suitable_size", min_size=min_batch_size))
+                    return 0
+
+                logger.info(_("batch.reducing_size", old_size=current_batch_size, new_size=new_batch_size))
+                current_batch_size = new_batch_size
+
+            except Exception as e:
+                logger.warning(_("batch.unexpected_error", size=current_batch_size, error=str(e)))
+
+                # Reduce batch size by half on unexpected errors too
+                new_batch_size = current_batch_size // 2
+                if new_batch_size < min_batch_size:
+                    return 0
+                current_batch_size = new_batch_size
+
+        # Should not reach here
+        logger.error(_("batch.no_suitable_size", min_size=min_batch_size))
+        return 0
+
+    def _transcribe_with_auto_batch_size(self, batched_model, audio_path, starting_batch_size=None):
+        """
+        Transcribe with automatic batch size reduction on OOM.
+        Similar to HuggingFace Accelerate's find_executable_batch_size decorator.
+
+        This function automatically retries with smaller batch sizes if OOM occurs,
+        implementing the same behavior as Accelerate's find_executable_batch_size.
+
+        Args:
+            batched_model: BatchedInferencePipeline instance
+            audio_path: Path to audio file
+            starting_batch_size: Initial batch size to try (uses self.batch_size if not specified)
+
+        Returns:
+            Tuple of (segments, info, actual_batch_size_used)
+        """
+        batch_size = starting_batch_size or self.batch_size or 32
+        min_batch_size = 1
+
+        while batch_size >= min_batch_size:
+            try:
+                logger.debug(_("batch.attempting_transcription", size=batch_size))
+
+                # Try transcription with current batch size
+                segments, info = batched_model.transcribe(
+                    audio_path,
+                    batch_size=batch_size,
+                    **self.generation_config
+                )
+
+                # Success! Return results with the batch size that worked
+                if batch_size < (starting_batch_size or self.batch_size or 32):
+                    logger.info(_("batch.auto_adjusted", size=batch_size))
+
+                return segments, info, batch_size
+
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() or "oom" in str(e).lower():
+                    # Reduce batch size by 0.8 (20% reduction, similar to Accelerate's 0.9 but more aggressive)
+                    new_batch_size = int(batch_size * 0.8)
+
+                    # Ensure we reduce by at least 1
+                    if new_batch_size == batch_size:
+                        new_batch_size = batch_size - 1
+
+                    logger.warning(_("batch.oom_reducing", old_size=batch_size, new_size=new_batch_size))
+
+                    batch_size = new_batch_size
+
+                    if batch_size < min_batch_size:
+                        logger.error(_("batch.cannot_run_min", min_size=min_batch_size))
+                        raise RuntimeError(_("batch.inference_failed", min_size=min_batch_size)) from e
+                else:
+                    # Not an OOM error, re-raise
+                    raise
+
+        # Should not reach here
+        raise RuntimeError("Failed to find executable batch size")
 
     def _scan(self, base_dirs) -> list[InferenceTask]:
         tasks: list[InferenceTask] = []

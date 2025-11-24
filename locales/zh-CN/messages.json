@@ -137,5 +137,22 @@
     "not_active": "VAD注入未激活，无需取消注入",
     "stop_error": "停止修补时出错：{error}",
     "auto_injected": "已自动注入VAD，使用模型：{model_id}"
+  },
+
+  "batch": {
+    "finding_optimal": "正在寻找最佳批次大小（测试范围：{min_size}-{max_size}）...",
+    "testing_size": "测试批次大小：{size}",
+    "size_successful": "批次大小 {size} 成功",
+    "optimal_found": "找到最佳批次大小：{size}",
+    "oom_error": "批次大小 {size} 因内存不足而失败",
+    "runtime_error": "批次大小 {size} 失败，错误：{error}",
+    "reducing_size": "将批次大小从 {old_size} 减小到 {new_size}",
+    "no_suitable_size": "即使使用最小批次大小 {min_size} 也无法找到合适的批次大小",
+    "unexpected_error": "测试批次大小 {size} 时出现意外错误：{error}",
+    "attempting_transcription": "尝试使用批次大小={size}进行转录",
+    "auto_adjusted": "内存不足后批次大小自动调整为 {size}",
+    "oom_reducing": "批次大小={old_size}时内存不足，减小到 {new_size} (x0.8)...",
+    "cannot_run_min": "即使使用批次大小={min_size}也无法运行",
+    "inference_failed": "即使使用最小批次大小={min_size}也无法运行推理。请考虑减小模型大小或使用CPU。"
   }
 }

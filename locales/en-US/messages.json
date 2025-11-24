@@ -137,5 +137,22 @@
     "not_active": "VAD injection not active, nothing to uninject",
     "stop_error": "Error stopping patch: {error}",
     "auto_injected": "Auto-injected VAD with model: {model_id}"
+  },
+
+  "batch": {
+    "finding_optimal": "Finding optimal batch size (testing range: {min_size}-{max_size})...",
+    "testing_size": "Testing batch size: {size}",
+    "size_successful": "Batch size {size} successful",
+    "optimal_found": "Optimal batch size found: {size}",
+    "oom_error": "Batch size {size} failed with out of memory error",
+    "runtime_error": "Batch size {size} failed with error: {error}",
+    "reducing_size": "Reducing batch size from {old_size} to {new_size}",
+    "no_suitable_size": "Cannot find suitable batch size even with minimum size {min_size}",
+    "unexpected_error": "Unexpected error testing batch size {size}: {error}",
+    "attempting_transcription": "Attempting transcription with batch_size={size}",
+    "auto_adjusted": "Batch size auto-adjusted to {size} after OOM",
+    "oom_reducing": "OOM with batch_size={old_size}, reducing to {new_size} (x0.8)...",
+    "cannot_run_min": "Cannot run even with batch_size={min_size}",
+    "inference_failed": "Unable to run inference even with minimum batch_size={min_size}. Consider reducing model size or using CPU."
   }
 }
