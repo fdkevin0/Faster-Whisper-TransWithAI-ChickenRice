@@ -11,13 +11,14 @@ import sys
 from collections import ChainMap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
 import librosa
 import numpy as np
 import pyjson5
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from faster_whisper_transwithai_chickenrice.vad_manager import VadConfig, VadModelManager
 
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,19 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--no_merge_segments", dest="merge_segments", action="store_false", default=None)
     parser.add_argument("--merge_max_gap_ms", type=int, default=None)
     parser.add_argument("--merge_max_duration_ms", type=int, default=None)
+
+    parser.add_argument("--enable_vad", dest="enable_vad", action="store_true", default=None)
+    parser.add_argument("--no_vad", dest="enable_vad", action="store_false", default=None)
+    parser.add_argument("--vad_threshold", type=float, default=None)
+    parser.add_argument("--vad_neg_threshold", type=float, default=None)
+    parser.add_argument("--vad_min_speech_duration_ms", type=int, default=None)
+    parser.add_argument("--vad_max_speech_duration_s", type=float, default=None)
+    parser.add_argument("--vad_min_silence_duration_ms", type=int, default=None)
+    parser.add_argument("--vad_speech_pad_ms", type=int, default=None)
+    parser.add_argument("--vad_model_path", type=str, default="models/whisper_vad.onnx")
+    parser.add_argument("--vad_metadata_path", type=str, default="models/whisper_vad_metadata.json")
+    parser.add_argument("--vad_num_threads", type=int, default=8)
+    parser.add_argument("--vad_force_cpu", action="store_true", default=False)
     parser.add_argument("base_dirs", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -219,8 +233,9 @@ def resolve_torch_dtype(dtype_name: str, runtime_device: str) -> torch.dtype:
 
 def _load_generation_config(path: str) -> Dict[str, Any]:
     defaults = {
-        "language": "ja",
+        "language": "zh",
         "task": "translate",
+        "vad_filter": True,
     }
     if not os.path.exists(path):
         return defaults
@@ -277,6 +292,13 @@ class Inference:
         self.generate_config = _load_generation_config(args.generation_config)
         self.segment_merge_options = _load_segment_merge_options(args, self.generate_config)
         self.generate_kwargs = _build_generate_kwargs(self.generate_config, args.max_new_tokens)
+        self.vad_enabled = self._resolve_vad_enabled(self.generate_config, args)
+        self.vad_options = self._resolve_vad_options(self.generate_config, args)
+        self.vad_model_path = args.vad_model_path
+        self.vad_metadata_path = args.vad_metadata_path
+        self.vad_num_threads = args.vad_num_threads
+        self.vad_force_cpu = args.vad_force_cpu
+        self._vad_manager: VadModelManager | None = None
         self.chunk_duration_sec = max(1.0, args.chunk_duration_sec)
         self.min_chunk_duration_sec = max(0.1, args.min_chunk_duration_sec)
         self.overwrite = args.overwrite
@@ -296,12 +318,43 @@ class Inference:
         logger.info("Runtime device: %s", self.device)
         logger.info("Torch dtype: %s", str(self.torch_dtype).replace("torch.", ""))
         logger.info("Generate kwargs: %s", self.generate_kwargs)
+        logger.info("VAD enabled: %s", self.vad_enabled)
+        if self.vad_enabled:
+            logger.info("VAD config: model_path=%s, force_cpu=%s, options=%s", self.vad_model_path, self.vad_force_cpu, self.vad_options)
         logger.info(
             "Segment merge: enabled=%s, max_gap_ms=%s, max_duration_ms=%s",
             self.segment_merge_options.enabled,
             self.segment_merge_options.max_gap_ms,
             self.segment_merge_options.max_duration_ms,
         )
+
+    @staticmethod
+    def _resolve_vad_enabled(generation_config: Dict[str, Any], args: argparse.Namespace) -> bool:
+        from_config = bool(generation_config.pop("vad_filter", True))
+        if args.enable_vad is not None:
+            return args.enable_vad
+        return from_config
+
+    @staticmethod
+    def _resolve_vad_options(generation_config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+        options: Dict[str, Any] = {}
+        from_config = generation_config.pop("vad_parameters", None)
+        if isinstance(from_config, dict):
+            options.update(from_config)
+
+        if args.vad_threshold is not None:
+            options["threshold"] = args.vad_threshold
+        if args.vad_neg_threshold is not None:
+            options["neg_threshold"] = args.vad_neg_threshold
+        if args.vad_min_speech_duration_ms is not None:
+            options["min_speech_duration_ms"] = args.vad_min_speech_duration_ms
+        if args.vad_max_speech_duration_s is not None:
+            options["max_speech_duration_s"] = args.vad_max_speech_duration_s
+        if args.vad_min_silence_duration_ms is not None:
+            options["min_silence_duration_ms"] = args.vad_min_silence_duration_ms
+        if args.vad_speech_pad_ms is not None:
+            options["speech_pad_ms"] = args.vad_speech_pad_ms
+        return options
 
     def _build_asr_pipeline(self):
         logger.info("Loading model: %s", self.model_name_or_path)
@@ -336,6 +389,74 @@ class Inference:
                 device=-1,
             )
 
+    def _get_vad_manager(self) -> VadModelManager | None:
+        if self._vad_manager is not None:
+            return self._vad_manager
+
+        if not self.vad_enabled:
+            return None
+
+        if not os.path.exists(self.vad_model_path):
+            logger.warning("VAD model not found at %s. Falling back to full-audio ASR.", self.vad_model_path)
+            return None
+
+        vad_config = VadConfig(default_model="whisper_vad")
+        vad_config.onnx_model_path = self.vad_model_path
+        if os.path.exists(self.vad_metadata_path):
+            vad_config.onnx_metadata_path = self.vad_metadata_path
+        vad_config.force_cpu = self.vad_force_cpu
+        vad_config.num_threads = self.vad_num_threads
+
+        if "threshold" in self.vad_options:
+            vad_config.threshold = float(self.vad_options["threshold"])
+        if "neg_threshold" in self.vad_options:
+            vad_config.neg_threshold = float(self.vad_options["neg_threshold"])
+        if "min_speech_duration_ms" in self.vad_options:
+            vad_config.min_speech_duration_ms = int(self.vad_options["min_speech_duration_ms"])
+        if "max_speech_duration_s" in self.vad_options:
+            vad_config.max_speech_duration_s = float(self.vad_options["max_speech_duration_s"])
+        if "min_silence_duration_ms" in self.vad_options:
+            vad_config.min_silence_duration_ms = int(self.vad_options["min_silence_duration_ms"])
+        if "speech_pad_ms" in self.vad_options:
+            vad_config.speech_pad_ms = int(self.vad_options["speech_pad_ms"])
+
+        try:
+            self._vad_manager = VadModelManager(config=vad_config, ttl=vad_config.ttl)
+            return self._vad_manager
+        except Exception as exc:
+            logger.warning("Failed to initialize VAD manager: %s. Falling back to full-audio ASR.", exc)
+            return None
+
+    def _get_speech_regions(self, audio: np.ndarray, sr: int) -> list[tuple[int, int]]:
+        manager = self._get_vad_manager()
+        if manager is None:
+            return [(0, len(audio))]
+
+        try:
+            raw_regions = manager.get_speech_timestamps(
+                model_id="whisper_vad",
+                audio=audio,
+                sampling_rate=sr,
+                **self.vad_options,
+            )
+        except Exception as exc:
+            logger.warning("VAD inference failed: %s. Falling back to full-audio ASR.", exc)
+            return [(0, len(audio))]
+
+        regions: list[tuple[int, int]] = []
+        for region in raw_regions:
+            start = max(0, int(region.get("start", 0)))
+            end = min(len(audio), int(region.get("end", 0)))
+            if end > start:
+                regions.append((start, end))
+
+        if not regions:
+            return []
+
+        regions.sort(key=lambda pair: pair[0])
+        logger.info("VAD detected %d speech regions.", len(regions))
+        return regions
+
     def generates(self, base_dirs: Iterable[str]) -> None:
         base_dirs = list(base_dirs)
         if not base_dirs:
@@ -369,28 +490,41 @@ class Inference:
 
         chunk_samples = int(self.chunk_duration_sec * sr)
         min_samples = int(self.min_chunk_duration_sec * sr)
-        total_chunks = max(1, math.ceil(len(audio) / chunk_samples)) if chunk_samples > 0 else 1
         all_segments: list[Segment] = []
+        regions = self._get_speech_regions(audio, sr) if self.vad_enabled else [(0, len(audio))]
+        if not regions:
+            logger.info("No speech detected by VAD.")
+            return []
 
-        for i in range(total_chunks):
-            start_sample = i * chunk_samples
-            end_sample = min((i + 1) * chunk_samples, len(audio))
-            current_audio = audio[start_sample:end_sample]
-            if len(current_audio) < min_samples:
+        chunk_index = 0
+        total_chunks = sum(max(1, math.ceil((end - start) / chunk_samples)) for start, end in regions)
+        for region_start, region_end in regions:
+            region_audio = audio[region_start:region_end]
+            if len(region_audio) < min_samples:
                 continue
 
-            time_offset_sec = start_sample / sr
-            try:
-                result = asr_pipe(
-                    {"raw": current_audio, "sampling_rate": sr},
-                    generate_kwargs=self.generate_kwargs,
-                )
-            except Exception as exc:
-                logger.warning("Chunk %d/%d failed: %s", i + 1, total_chunks, exc)
-                continue
+            region_chunks = max(1, math.ceil(len(region_audio) / chunk_samples))
+            for i in range(region_chunks):
+                local_start_sample = i * chunk_samples
+                local_end_sample = min((i + 1) * chunk_samples, len(region_audio))
+                current_audio = region_audio[local_start_sample:local_end_sample]
+                if len(current_audio) < min_samples:
+                    continue
 
-            all_segments.extend(self._extract_segments(result, time_offset_sec))
-            logger.info("Chunk %d/%d done.", i + 1, total_chunks)
+                chunk_index += 1
+                global_start_sample = region_start + local_start_sample
+                time_offset_sec = global_start_sample / sr
+                try:
+                    result = asr_pipe(
+                        {"raw": current_audio, "sampling_rate": sr},
+                        generate_kwargs=self.generate_kwargs,
+                    )
+                except Exception as exc:
+                    logger.warning("Chunk %d/%d failed: %s", chunk_index, total_chunks, exc)
+                    continue
+
+                all_segments.extend(self._extract_segments(result, time_offset_sec))
+                logger.info("Chunk %d/%d done.", chunk_index, total_chunks)
 
         return all_segments
 
