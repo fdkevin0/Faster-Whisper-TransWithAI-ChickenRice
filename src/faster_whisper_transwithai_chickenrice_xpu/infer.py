@@ -25,6 +25,8 @@ log_handler = logging.StreamHandler()
 log_handler.setFormatter(logging.Formatter("%(message)s"))
 logger.addHandler(log_handler)
 
+DEFAULT_HF_MODEL_ID = "chickenrice0721/whisper-large-v2-translate-zh-v0.2-st"
+
 
 @dataclass
 class Segment:
@@ -167,7 +169,7 @@ class SubWriter:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local ASR/translation pipeline with Intel XPU support.")
-    parser.add_argument("--model_name_or_path", type=str, default="models")
+    parser.add_argument("--model_name_or_path", type=str, default=DEFAULT_HF_MODEL_ID)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "xpu", "cuda", "cpu"])
     parser.add_argument("--torch_dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--generation_config", type=str, default="generation_config.json5")
@@ -267,7 +269,9 @@ class Inference:
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.model_name_or_path = args.model_name_or_path
+        self.model_name_or_path = args.model_name_or_path.strip() if args.model_name_or_path else DEFAULT_HF_MODEL_ID
+        if not self.model_name_or_path:
+            self.model_name_or_path = DEFAULT_HF_MODEL_ID
         self.device = resolve_device(args.device)
         self.torch_dtype = resolve_torch_dtype(args.torch_dtype, self.device)
         self.generate_config = _load_generation_config(args.generation_config)
